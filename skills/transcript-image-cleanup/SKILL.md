@@ -14,8 +14,9 @@ What it does to each image: the block becomes `[image stripped <date>: <path of 
 Built-in safety:
 - Without `--apply` it only reports (dry run).
 - It skips sessions of running `claude` processes and files modified in the last 30 minutes (`--min-age`).
-- It **moves** originals to a backup folder: the macOS Trash by default, otherwise `~/.local/share/transcript-image-cleanup/backups` (or `--backup-dir`). Space is freed only after the user empties it. To undo, move a file back.
-- Each file is validated before the swap (same line count, same record uuids, every line parses).
+- It **keeps** originals in a backup folder: the macOS Trash by default, otherwise `~/.local/share/transcript-image-cleanup/backups` (or `--backup-dir`), as a hard link or, across volumes, a copy; it never overwrites an existing backup. Space is freed only after the user empties it. To undo, move a file back.
+- Each file is validated before the swap (same line count, same record uuids, every line parses); a file that changed meanwhile is skipped (`SKIPPED` line); the swap is one atomic rename.
+- macOS and Linux only: on Windows it exits with a message before doing anything.
 
 ## Procedure
 
@@ -36,7 +37,7 @@ Built-in safety:
    ```
    The script prints the backup folder.
 
-5. **Verify.** Check that the largest stripped session still loads, without appending to it. Run this from that session's original working directory (the `cwd` field in its JSONL):
+5. **Verify.** Check that the largest stripped session still loads, without appending to it. Tell the user first that this sends the resumed session to the model — it costs tokens (a lot for a big session, even with haiku) — and runs under that project's hooks and settings; skip it or pick a smaller session if they prefer. Run this from that session's original working directory (the `cwd` field in its JSONL):
    ```
    cd "<cwd>" && claude -p --resume <session-id> --fork-session --model haiku "In one sentence: how did this conversation end?"
    ```

@@ -16,10 +16,14 @@ Safety:
   * dry-run report by default; nothing is written without --apply
   * sessions of running `claude` processes and files modified in the last
     --min-age minutes are skipped
-  * originals are moved to a backup directory (default: the macOS Trash, or
-    ~/.local/share/transcript-image-cleanup/backups elsewhere); undo = move back
+  * originals are kept in a backup directory (default: the macOS Trash, or
+    ~/.local/share/transcript-image-cleanup/backups elsewhere) as a hard link,
+    or a copy when that directory is on another volume; an existing backup is
+    never overwritten; undo = move the backup back
   * each rewritten file is validated (same line count, same record uuids/types,
-    every line parses) before the atomic swap
+    every line parses); a file that changed while being processed is skipped;
+    the stripped version then replaces the original in one atomic rename
+  * macOS and Linux only (live-session detection uses POSIX signals)
 
 Usage:
   strip_images.py [--apply] [--project NAME ...] [--min-age 30] [-v] [PATH ...]
@@ -29,6 +33,8 @@ $CLAUDE_CONFIG_DIR (or ~/.claude). Requires Python 3.8+, no dependencies.
 """
 
 import argparse
+import base64
+import binascii
 import datetime
 import glob
 import hashlib
@@ -36,6 +42,7 @@ import json
 import os
 import shutil
 import sys
+import tempfile
 
 HOME = os.path.expanduser("~")
 CONFIG_DIR = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(HOME, ".claude")
@@ -87,12 +94,20 @@ class Stripper:
         data = src.get("data", "")
         self.count += 1
         self.removed += len(data)
-        what = self.path_for.get(tool_id) or "inline image (screenshot/paste)"
-        sha = hashlib.sha256(data.encode()).hexdigest()[:12]
+        what = self.path_for.get(tool_id) or (
+            "inline image (screenshot/paste)"
+            if block["type"] == "image"
+            else "inline document (see preceding tool result)"
+        )
+        try:  # size and hash of the embedded bytes (= the file, unless Claude Code resized it)
+            raw = base64.b64decode(data, validate=True)
+            size, sha = len(raw), hashlib.sha256(raw).hexdigest()[:12]
+        except (binascii.Error, ValueError):  # not valid base64: describe the text
+            size, sha = len(data) * 3 // 4, hashlib.sha256(data.encode()).hexdigest()[:12]
         return {
             "type": "text",
             "text": f"[{block['type']} stripped {STAMP}: {what}; "
-            f"{src.get('media_type', '?')}, {len(data) * 3 // 4} B, sha256:{sha}]",
+            f"{src.get('media_type', '?')}, {size} B, sha256:{sha}]",
         }
 
     def walk(self, obj, tool_id=None):
@@ -141,8 +156,74 @@ def tool_paths(records):
     return m
 
 
+class Changed(Exception):
+    """The transcript changed while it was being processed."""
+
+
+def backup_path(f, backup_root):
+    """Backup location: path relative to the projects dir, or the full path outside it."""
+    full = os.path.abspath(f)
+    rel = os.path.relpath(full, PROJECTS)
+    if rel == os.pardir or rel.startswith(os.pardir + os.sep):
+        rel = os.path.join("outside-projects", full.lstrip(os.sep))
+    return os.path.join(backup_root, rel)
+
+
+def make_backup(f, dest):
+    """Hard-link f to dest, or copy it there; never overwrite, never leave a partial copy."""
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    try:
+        os.link(f, dest)  # same volume: instant, no extra space; fails if dest exists
+        return
+    except OSError:
+        pass  # other volume, no hard links, or dest exists: the "xb" open below decides
+    with open(f, "rb") as src:
+        dst = open(dest, "xb")  # noqa: SIM115 -- closed explicitly so a failing close is handled; "xb" never overwrites
+        done = False
+        try:
+            try:
+                shutil.copyfileobj(src, dst, 1 << 20)
+                dst.flush()
+                os.fsync(dst.fileno())
+            finally:
+                dst.close()  # can fail too (disk full while flushing)
+            done = True
+        finally:
+            if not done:
+                os.remove(dest)  # created by this call; an incomplete copy is no backup
+    shutil.copystat(f, dest)
+
+
+def swap_in(f, new, st0, dest):
+    """Replace f with `new`, keeping the original at dest. f changes only in the final rename."""
+    fd, tmp = tempfile.mkstemp(
+        dir=os.path.dirname(f) or ".", prefix=os.path.basename(f) + ".", suffix=".strip-tmp"
+    )  # unique name: two runs on one file never share a temp file
+    try:
+        with os.fdopen(fd, "wb") as h:
+            h.write(new)
+            h.flush()
+            os.fsync(h.fileno())
+        os.chmod(tmp, st0.st_mode & 0o777)
+        os.utime(tmp, ns=(st0.st_atime_ns, st0.st_mtime_ns))
+        make_backup(f, dest)
+        st1 = os.stat(f)
+        if (st1.st_size, st1.st_mtime_ns, st1.st_ino) != (
+            st0.st_size,
+            st0.st_mtime_ns,
+            st0.st_ino,
+        ):
+            os.remove(dest)  # made above from the unchanged-name file; f was not replaced
+            raise Changed("changed while being processed; re-run later")
+        os.replace(tmp, f)
+    finally:
+        if os.path.lexists(tmp):
+            os.remove(tmp)
+
+
 def process(f, apply, backup_root):
     """Return (bytes_before, bytes_after, blocks_replaced); 0s if nothing to do."""
+    st0 = os.stat(f)  # before reading, so any later append is detected
     with open(f, "rb") as h:
         raw = h.read().splitlines(keepends=True)
     if not any(b'"base64"' in line for line in raw):
@@ -157,7 +238,11 @@ def process(f, apply, backup_root):
         before = s.removed
         n = s.walk(o)
         if s.removed > before:
-            out.append((json.dumps(n, ensure_ascii=False, separators=(",", ":")) + "\n").encode())
+            try:
+                enc = json.dumps(n, ensure_ascii=False, separators=(",", ":")).encode()
+            except UnicodeEncodeError:  # lone surrogate (half an emoji): keep it escaped
+                enc = json.dumps(n, separators=(",", ":")).encode()
+            out.append(enc + b"\n")
         else:
             out.append(line)
     if not s.removed:
@@ -173,21 +258,7 @@ def process(f, apply, backup_root):
 
     new = b"".join(out)
     if apply:
-        st = os.stat(f)
-        tmp = f + ".strip-tmp"
-        with open(tmp, "wb") as h:
-            h.write(new)
-            h.flush()
-            os.fsync(h.fileno())
-        os.chmod(tmp, st.st_mode & 0o777)
-        os.utime(tmp, ns=(st.st_atime_ns, st.st_mtime_ns))
-        rel = os.path.relpath(f, PROJECTS)
-        if rel.startswith(".."):
-            rel = os.path.basename(f)
-        dest = os.path.join(backup_root, rel)
-        os.makedirs(os.path.dirname(dest), exist_ok=True)
-        shutil.move(f, dest)  # rename on the same volume: instant, no extra space
-        os.replace(tmp, f)
+        swap_in(f, new, st0, backup_path(f, backup_root))
     return sum(map(len, raw)), len(new), s.count
 
 
@@ -197,6 +268,12 @@ def project_label(name):
 
 
 def main():
+    if sys.platform == "win32":
+        sys.exit(
+            "transcript-image-cleanup: Windows is not supported (live-session detection "
+            "relies on POSIX signals). Run it on macOS or Linux, or inside WSL for "
+            "WSL-based Claude Code."
+        )
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument(
         "paths",
@@ -235,6 +312,7 @@ def main():
             if p.endswith(".jsonl")
             else glob.glob(os.path.join(p, "**", "*.jsonl"), recursive=True)
         )
+    files = sorted(files)
 
     def proj_of(f):
         rel = os.path.relpath(f, PROJECTS)
@@ -253,32 +331,45 @@ def main():
     now = datetime.datetime.now().timestamp()
     rows = {}  # project -> [sessions_with_images, blocks, before, after, skipped, total]
     errors = 0
-    for f in sorted(files):
-        try:
-            st = os.stat(f)
-        except OSError:
-            continue  # vanished while scanning
-        r = rows.setdefault(proj_of(f), [0, 0, 0, 0, 0, 0])
-        r[5] += st.st_size
-        if session_id(f) in live or now - st.st_mtime < a.min_age * 60:
-            r[4] += st.st_size
-            continue
-        try:
-            b, n, c = process(f, a.apply, backup)
-        except Exception as e:  # files are swapped only after validation
-            print(f"ERROR {f}: {e}", file=sys.stderr)
-            errors += 1
-            continue
-        if b:
-            r[0] += 1
-            r[1] += c
-            r[2] += b
-            r[3] += n
-            if a.verbose and b - n > 5_000_000:
-                print(
-                    f"{'stripped' if a.apply else 'would strip'} {b / 1e6:8.1f} -> {n / 1e6:7.1f} MB  "
-                    f"{os.path.relpath(f, PROJECTS)}"
-                )
+    try:
+        for f in files:
+            try:
+                st = os.stat(f)
+            except OSError:
+                continue  # vanished while scanning
+            r = rows.setdefault(proj_of(f), [0, 0, 0, 0, 0, 0])
+            r[5] += st.st_size
+            if session_id(f) in live or now - st.st_mtime < a.min_age * 60:
+                r[4] += st.st_size
+                continue
+            try:
+                b, n, c = process(f, a.apply, backup)
+            except Changed as e:
+                print(f"SKIPPED {f}: {e}", file=sys.stderr)
+                r[4] += st.st_size
+                continue
+            except Exception as e:  # noqa: BLE001 -- one bad file must not stop the run;
+                # the transcript is replaced only after validation, so it is intact here
+                print(f"ERROR {f}: {e}", file=sys.stderr)
+                errors += 1
+                continue
+            if b:
+                r[0] += 1
+                r[1] += c
+                r[2] += b
+                r[3] += n
+                if a.verbose and b - n > 5_000_000:
+                    print(
+                        f"{'stripped' if a.apply else 'would strip'} {b / 1e6:8.1f} -> {n / 1e6:7.1f} MB  "
+                        f"{os.path.relpath(f, PROJECTS)}"
+                    )
+    except KeyboardInterrupt:
+        if a.apply and os.path.isdir(backup):
+            print(
+                f"\ninterrupted -- originals of files stripped so far are in: {backup}",
+                file=sys.stderr,
+            )
+        sys.exit(130)
 
     mb = lambda x: f"{x / 1e6:,.0f}".replace(",", " ")
     verb = "freed" if a.apply else "savable"
@@ -297,7 +388,7 @@ def main():
         f"| **total** | {mb(tot[5])} | {tot[0]} | {tot[1]} | {mb(tot[2] - tot[3])} | {mb(tot[4])} |"
     )
     if a.apply and tot[2]:
-        print(f"\noriginals moved to: {backup}")
+        print(f"\noriginals kept in: {backup}")
     elif not a.apply and tot[2]:
         print("\ndry run -- nothing changed; re-run with --apply to strip")
     sys.exit(1 if errors else 0)

@@ -5,6 +5,14 @@
   "author": {
     "name": "Matěj Novák"
   },
+  "homepage": "https://github.com/MatejNovak77/transcript-image-cleanup",
+  "repository": "https://github.com/MatejNovak77/transcript-image-cleanup",
   "license": "MIT",
-  "keywords": ["transcripts", "disk-space", "images", "cleanup", "session-history"]
+  "keywords": [
+    "transcripts",
+    "disk-space",
+    "images",
+    "cleanup",
+    "session-history"
+  ]
 }
