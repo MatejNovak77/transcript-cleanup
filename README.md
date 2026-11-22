@@ -116,6 +116,7 @@ The repository has a test suite on synthetic transcripts (`python3 -m pytest tes
 
 ## Caveats
 
+- **Use at your own risk.** This tool rewrites your conversation history and comes with no warranty (see the MIT license). Run the report first, and keep the backup until you are sure the cleaned sessions work for you.
 - The transcript format belongs to Claude Code and is not a public API. Only record kinds measured on 2.1.330 are touched, by exact name. Keep the backup until you have resumed a cleaned session.
 - Removed API request records may serve Claude Code features the measurement did not exercise, such as bug reports or internal diagnostics. Prompt caching of a resumed session was unaffected in the tests. The records come back only from the backup.
 - Live-session detection reads Claude Code's internal `~/.claude/sessions/<pid>.json` registry. The modification-age guard is the fallback.
