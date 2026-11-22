@@ -1,4 +1,4 @@
-# transcript-image-cleanup
+# transcript-cleanup
 
 A Claude Code skill (packaged as a plugin) that finds what bloats your Claude Code conversation history — base64 images, and repeated system data such as saved API request records — and, after you approve, removes it. The history stays and `claude --resume` keeps working. Only the pixels and the copies Claude Code does not read back go.
 
@@ -47,7 +47,7 @@ How it was checked: test sessions (including a compacted one, one with a subagen
 
 - **Dry run by default.** It writes nothing without `--apply`.
 - **Skips live sessions**, i.e. sessions of running `claude` processes, plus any file modified in the last 30 minutes.
-- **Originals are kept, not deleted.** They go to the macOS Trash, or `~/.local/share/transcript-image-cleanup/backups` on Linux, or `--backup-dir` — as a hard link (instant, no extra space) or a copy when that folder is on another volume. An existing backup is never overwritten. To undo, move a file back. The space is freed only once you empty that location.
+- **Originals are kept, not deleted.** They go to the macOS Trash, or `~/.local/share/transcript-cleanup/backups` on Linux, or `--backup-dir` — as a hard link (instant, no extra space) or a copy when that folder is on another volume. An existing backup is never overwritten. To undo, move a file back. The space is freed only once you empty that location.
 - **Validated, atomic swap.** Image stripping must keep every line with the same record uuid and type, and every line must parse. System-data cleanup is checked independently before the swap: every other line must stay byte-for-byte identical and in order, only uuid-less API request records may disappear, and a `skill_listing` may only lose text that its `rendered` copy still holds. A file that changed while it was being processed (a session that came alive) is skipped and reported; only a write in the instant between that last check and the swap would end up in the backup alone. The stripped version then replaces the original in one atomic rename, so an error or Ctrl-C leaves either the original or the complete stripped file.
 
 ## Install
@@ -55,29 +55,29 @@ How it was checked: test sessions (including a compacted one, one with a subagen
 As a plugin (this repo is its own marketplace):
 
 ```
-/plugin marketplace add MatejNovak77/transcript-image-cleanup
-/plugin install transcript-image-cleanup@transcript-image-cleanup
+/plugin marketplace add MatejNovak77/transcript-cleanup
+/plugin install transcript-cleanup@transcript-cleanup
 ```
 
 Or as a personal skill:
 
 ```
-git clone https://github.com/MatejNovak77/transcript-image-cleanup
-ln -s "$PWD/transcript-image-cleanup/skills/transcript-image-cleanup" ~/.claude/skills/transcript-image-cleanup
+git clone https://github.com/MatejNovak77/transcript-cleanup
+ln -s "$PWD/transcript-cleanup/skills/transcript-cleanup" ~/.claude/skills/transcript-cleanup
 ```
 
 ## Use
 
-In Claude Code, ask something like *"how much space do images take in my Claude history?"*, *"slim down my Claude Code transcripts"* or *"clean images out of the transcripts of project X"*, or run `/transcript-image-cleanup`. Claude maps first, shows a per-project table with images and system data separately, asks which kinds to remove and for approval, cleans, then verifies that the biggest session still resumes.
+In Claude Code, ask something like *"how much space do images take in my Claude history?"*, *"slim down my Claude Code transcripts"* or *"clean images out of the transcripts of project X"*, or run `/transcript-cleanup`. Claude maps first, shows a per-project table with images and system data separately, asks which kinds to remove and for approval, cleans, then verifies that the biggest session still resumes.
 
 The script also works on its own (Python 3.8+, no dependencies):
 
 ```
-python3 skills/transcript-image-cleanup/scripts/strip_images.py                       # report, all projects
-python3 skills/transcript-image-cleanup/scripts/strip_images.py --project my-app -v   # one project, list big files
-python3 skills/transcript-image-cleanup/scripts/strip_images.py --apply               # strip images
-python3 skills/transcript-image-cleanup/scripts/strip_images.py --apply --clean system-data   # system data only
-python3 skills/transcript-image-cleanup/scripts/strip_images.py --apply --clean all   # both
+python3 skills/transcript-cleanup/scripts/strip_images.py                       # report, all projects
+python3 skills/transcript-cleanup/scripts/strip_images.py --project my-app -v   # one project, list big files
+python3 skills/transcript-cleanup/scripts/strip_images.py --apply               # strip images
+python3 skills/transcript-cleanup/scripts/strip_images.py --apply --clean system-data   # system data only
+python3 skills/transcript-cleanup/scripts/strip_images.py --apply --clean all   # both
 ```
 
 The report always shows both kinds; `--clean` (default `images`) only selects what `--apply` removes. System data is counted after images, so the two columns add up.

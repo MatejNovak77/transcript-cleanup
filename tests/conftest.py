@@ -12,9 +12,7 @@ from pathlib import Path
 
 import pytest
 
-_SCRIPTS = str(
-    Path(__file__).resolve().parent.parent / "skills" / "transcript-image-cleanup" / "scripts"
-)
+_SCRIPTS = str(Path(__file__).resolve().parent.parent / "skills" / "transcript-cleanup" / "scripts")
 if _SCRIPTS not in sys.path:
     sys.path.insert(0, _SCRIPTS)
 

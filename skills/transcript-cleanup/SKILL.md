@@ -1,5 +1,5 @@
 ---
-name: transcript-image-cleanup
+name: transcript-cleanup
 description: Map what bloats Claude Code conversation history (~/.claude/projects) for one project or all of them — base64 images and PDFs, and repeated system data (saved API request records, skill-list copies) — and, after the user approves, replace images with short text placeholders and remove the system data, so the history and `claude --resume` keep working while space is freed. Use when the user asks how much space images take in Claude Code transcripts, wants to clean up / shrink / slim down Claude Code history, remove images from past conversations, when ~/.claude is eating disk space, or when a session fails to resume because it is too large or hits "image exceeds dimension limit".
 ---
 
@@ -16,7 +16,7 @@ What it does to each image: the block becomes `[image stripped <date>: <path of 
 Built-in safety:
 - Without `--apply` it only reports (dry run).
 - It skips sessions of running `claude` processes and files modified in the last 30 minutes (`--min-age`).
-- It **keeps** originals in a backup folder: the macOS Trash by default, otherwise `~/.local/share/transcript-image-cleanup/backups` (or `--backup-dir`), as a hard link or, across volumes, a copy; it never overwrites an existing backup. Space is freed only after the user empties it. To undo, move a file back.
+- It **keeps** originals in a backup folder: the macOS Trash by default, otherwise `~/.local/share/transcript-cleanup/backups` (or `--backup-dir`), as a hard link or, across volumes, a copy; it never overwrites an existing backup. Space is freed only after the user empties it. To undo, move a file back.
 - Each file is validated before the swap (images: same record uuids and types on every line, every line parses; system data: every other line byte-identical and in order, only uuid-less API request records removed); a file that changed meanwhile is skipped (`SKIPPED` line); the swap is one atomic rename.
 - macOS and Linux only: on Windows it exits with a message before doing anything.
 

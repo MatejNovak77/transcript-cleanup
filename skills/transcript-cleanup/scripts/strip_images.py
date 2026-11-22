@@ -22,7 +22,7 @@ Safety:
   * sessions of running `claude` processes and files modified in the last
     --min-age minutes are skipped
   * originals are kept in a backup directory (default: the macOS Trash, or
-    ~/.local/share/transcript-image-cleanup/backups elsewhere) as a hard link,
+    ~/.local/share/transcript-cleanup/backups elsewhere) as a hard link,
     or a copy when that directory is on another volume; an existing backup is
     never overwritten; undo = move the backup back
   * each rewritten file is validated (images: same record uuids/types, every
@@ -65,7 +65,7 @@ def default_backup_root():
     trash = os.path.join(HOME, ".Trash")
     if sys.platform == "darwin" and os.path.isdir(trash):
         return trash
-    return os.path.join(HOME, ".local", "share", "transcript-image-cleanup", "backups")
+    return os.path.join(HOME, ".local", "share", "transcript-cleanup", "backups")
 
 
 def live_sessions():
@@ -388,7 +388,7 @@ def project_label(name):
 def main():
     if sys.platform == "win32":
         sys.exit(
-            "transcript-image-cleanup: Windows is not supported (live-session detection "
+            "transcript-cleanup: Windows is not supported (live-session detection "
             "relies on POSIX signals). Run it on macOS or Linux, or inside WSL for "
             "WSL-based Claude Code."
         )

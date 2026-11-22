@@ -1,12 +1,12 @@
 {
-  "name": "transcript-image-cleanup",
+  "name": "transcript-cleanup",
   "version": "0.1.0",
   "description": "Map and strip base64 images and repeated system data (saved API request records) from Claude Code conversation history, keeping the history and --resume intact while freeing space.",
   "author": {
     "name": "Matěj Novák"
   },
-  "homepage": "https://github.com/MatejNovak77/transcript-image-cleanup",
-  "repository": "https://github.com/MatejNovak77/transcript-image-cleanup",
+  "homepage": "https://github.com/MatejNovak77/transcript-cleanup",
+  "repository": "https://github.com/MatejNovak77/transcript-cleanup",
   "license": "MIT",
   "keywords": [
     "transcripts",
