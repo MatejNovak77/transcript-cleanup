@@ -7,7 +7,7 @@ description: Map what bloats Claude Code conversation history (~/.claude/project
 
 Claude Code stores every image it reads (Read tool, browser screenshots, pasted images) inside the session JSONL as base64 — **twice** (`message.content` for the model plus `toolUseResult.file.base64` for the UI), plus copies in `api-request-blob` records. Projects that read scans or take many screenshots grow to gigabytes.
 
-Tool: `scripts/strip_images.py` in this skill's base directory. Always run it with `python3 -I "<skill-dir>/scripts/strip_images.py"`.
+Tool: `scripts/transcript_cleanup.py` in this skill's base directory. Always run it with `python3 -I "<skill-dir>/scripts/transcript_cleanup.py"`.
 
 System data (`--clean system-data`): since Claude Code 2.1.300 every transcript also stores API request records (`api-request`, `api-request-blob`, `api-request-shape`) that repeat request parameters, tool definitions and messages; they have no `uuid` and are removed. A `skill_listing` attachment's text is emptied when its `rendered` copy (what the model saw) holds it. `prompt_snapshot` and `instructions` records are left alone: a resume reads them (measured on 2.1.330). Every other line stays byte-for-byte identical.
 
@@ -24,8 +24,8 @@ Built-in safety:
 
 1. **Map (read-only, always first).** Run for all projects, or for one or more projects matched by a substring of the project directory name:
    ```
-   python3 -I "<skill-dir>/scripts/strip_images.py"
-   python3 -I "<skill-dir>/scripts/strip_images.py" --project my-project
+   python3 -I "<skill-dir>/scripts/transcript_cleanup.py"
+   python3 -I "<skill-dir>/scripts/transcript_cleanup.py" --project my-project
    ```
    `-v` also lists individual files that would shrink by more than 5 MB. The output is a markdown table (project, total MB, sessions with images, image blocks, images savable MB, system data savable MB, MB skipped as live/recent); a dry run always reports both kinds. Show it to the user.
 
@@ -37,7 +37,7 @@ Built-in safety:
 
 5. **Apply** with the same filters and age limits used for mapping:
    ```
-   python3 -I "<skill-dir>/scripts/strip_images.py" --apply --clean images|system-data|all [--older-than DAYS …] [--project …]
+   python3 -I "<skill-dir>/scripts/transcript_cleanup.py" --apply --clean images|system-data|all [--older-than DAYS …] [--project …]
    ```
    Without `--clean`, `--apply` strips images only.
    The script prints the backup folder.

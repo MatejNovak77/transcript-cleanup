@@ -32,7 +32,7 @@ Safety:
   * macOS and Linux only (live-session detection uses POSIX signals)
 
 Usage:
-  strip_images.py [--apply [--clean images|system-data|all]] [--project NAME ...]
+  transcript_cleanup.py [--apply [--clean images|system-data|all]] [--project NAME ...]
                   [--older-than DAYS] [--images-older-than DAYS] [--system-older-than DAYS]
                   [--min-age 30] [-v] [PATH ...]
 

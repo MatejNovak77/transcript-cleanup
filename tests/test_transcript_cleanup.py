@@ -1,4 +1,4 @@
-"""Tests of strip_images.py on synthetic transcripts (no real ~/.claude is touched)."""
+"""Tests of transcript_cleanup.py on synthetic transcripts (no real ~/.claude is touched)."""
 
 import base64
 import errno
@@ -11,7 +11,7 @@ import time
 import uuid
 
 import pytest
-import strip_images
+import transcript_cleanup
 
 PLACEHOLDER_RE = re.compile(
     r"^\[(image|document) stripped \d{4}-\d\d-\d\d: .+; [^,]+, \d+ B, sha256:[0-9a-f]{12}\]$"
@@ -148,9 +148,9 @@ def backups(env):
 
 def run(monkeypatch, capsys, *args):
     """Run main() with argv; return (exit code, stdout, stderr). Ctrl-C escaping main is reported."""
-    monkeypatch.setattr(sys, "argv", ["strip_images.py", *[str(a) for a in args]])
+    monkeypatch.setattr(sys, "argv", ["transcript_cleanup.py", *[str(a) for a in args]])
     try:
-        strip_images.main()
+        transcript_cleanup.main()
         code = 0
     except SystemExit as e:
         code = e.code
@@ -183,7 +183,7 @@ def test_strip_read_image_names_path(monkeypatch, capsys, env, session):
 
 def test_ui_copy_becomes_tiny_png(monkeypatch, capsys, env, session):
     apply(monkeypatch, capsys, env)
-    assert lines(session)[1]["toolUseResult"]["file"]["base64"] == strip_images.TINY_PNG
+    assert lines(session)[1]["toolUseResult"]["file"]["base64"] == transcript_cleanup.TINY_PNG
 
 
 def test_strip_pasted_image_inline_label(monkeypatch, capsys, env):
@@ -206,7 +206,7 @@ def test_strip_pdf_shape_a_labelled_document(monkeypatch, capsys, env):
     ph = placeholders(f)
     assert len(ph) == 1
     assert "screenshot" not in ph[0] and "inline document" in ph[0]
-    assert lines(f)[1]["toolUseResult"]["file"]["base64"] == strip_images.TINY_PNG
+    assert lines(f)[1]["toolUseResult"]["file"]["base64"] == transcript_cleanup.TINY_PNG
 
 
 def test_uuids_order_mtime_preserved(monkeypatch, capsys, env, session):
@@ -283,7 +283,7 @@ def test_dead_pid_not_live(monkeypatch, capsys, env, session):
     def dead(pid, sig):
         raise ProcessLookupError
 
-    monkeypatch.setattr(strip_images.os, "kill", dead)
+    monkeypatch.setattr(transcript_cleanup.os, "kill", dead)
     apply(monkeypatch, capsys, env)
     assert len(placeholders(session)) == 1
 
@@ -299,8 +299,8 @@ def test_windows_refused_before_signal(monkeypatch, capsys, env, session):
     (env.cfg / "sessions").mkdir()
     (env.cfg / "sessions" / "1.json").write_text(json.dumps({"pid": 4, "sessionId": "x"}))
     calls = []
-    monkeypatch.setattr(strip_images.os, "kill", lambda *a: calls.append(a))
-    monkeypatch.setattr(strip_images.sys, "platform", "win32")
+    monkeypatch.setattr(transcript_cleanup.os, "kill", lambda *a: calls.append(a))
+    monkeypatch.setattr(transcript_cleanup.sys, "platform", "win32")
     before = snapshot(env.root)
     code, _, _ = apply(monkeypatch, capsys, env)
     assert isinstance(code, str) and "Windows" in code
@@ -356,11 +356,11 @@ def _boom(*a, **k):
 def test_interrupt_at_each_step_keeps_file_whole(monkeypatch, capsys, env, session, point):
     before = session.read_bytes()
     if point == "fsync":
-        monkeypatch.setattr(strip_images.os, "fsync", _boom)
+        monkeypatch.setattr(transcript_cleanup.os, "fsync", _boom)
     elif point == "backup":
-        monkeypatch.setattr(strip_images.os, "link", _boom)
+        monkeypatch.setattr(transcript_cleanup.os, "link", _boom)
     else:
-        monkeypatch.setattr(strip_images.os, "replace", _boom)
+        monkeypatch.setattr(transcript_cleanup.os, "replace", _boom)
     apply(monkeypatch, capsys, env)
     assert session.exists() and is_whole(session, before)
     assert no_tmp(env)
@@ -375,7 +375,7 @@ def test_existing_backup_never_overwritten(env, session):
     dest.write_bytes(b"precious")
     before = session.read_bytes()
     with pytest.raises(FileExistsError):
-        strip_images.process(str(session), True, str(root))
+        transcript_cleanup.process(str(session), True, str(root))
     assert dest.read_bytes() == b"precious"
     assert session.read_bytes() == before
     assert no_tmp(env)
@@ -387,7 +387,7 @@ def test_cross_device_falls_back_to_copy(monkeypatch, capsys, env, session):
     def exdev(*a, **k):
         raise OSError(errno.EXDEV, "cross-device link")
 
-    monkeypatch.setattr(strip_images.os, "link", exdev)
+    monkeypatch.setattr(transcript_cleanup.os, "link", exdev)
     code, _, _ = apply(monkeypatch, capsys, env)
     assert code == 0
     (bk,) = backups(env)
@@ -410,8 +410,8 @@ def test_copy_fallback_interrupted_leaves_no_backup_or_partial(
         dst.write(src.read(100))
         raise exc()
 
-    monkeypatch.setattr(strip_images.os, "link", exdev)
-    monkeypatch.setattr(strip_images.shutil, "copyfileobj", half_copy)
+    monkeypatch.setattr(transcript_cleanup.os, "link", exdev)
+    monkeypatch.setattr(transcript_cleanup.shutil, "copyfileobj", half_copy)
     apply(monkeypatch, capsys, env)
     assert session.read_bytes() == before
     assert backups(env) == []
@@ -441,8 +441,8 @@ def test_copy_fallback_close_failure_leaves_no_backup(monkeypatch, capsys, env, 
     def exdev(*a, **k):
         raise OSError(errno.EXDEV, "cross-device link")
 
-    monkeypatch.setattr(strip_images.os, "link", exdev)
-    monkeypatch.setattr(strip_images, "open", fake_open, raising=False)
+    monkeypatch.setattr(transcript_cleanup.os, "link", exdev)
+    monkeypatch.setattr(transcript_cleanup, "open", fake_open, raising=False)
     code, _, err = apply(monkeypatch, capsys, env)
     assert code == 1 and "ERROR" in err
     assert session.read_bytes() == before
@@ -464,14 +464,14 @@ def test_lone_surrogate_record_strips(monkeypatch, capsys, env):
 def test_append_during_processing_skips(monkeypatch, capsys, env, session):
     before = session.read_bytes()
     extra = json.dumps(rec("user", [{"type": "text", "text": "late"}])) + "\n"
-    real = strip_images.tool_paths
+    real = transcript_cleanup.tool_paths
 
     def appending(records):
         with open(session, "a") as h:
             h.write(extra)
         return real(records)
 
-    monkeypatch.setattr(strip_images, "tool_paths", appending)
+    monkeypatch.setattr(transcript_cleanup, "tool_paths", appending)
     code, _, err = apply(monkeypatch, capsys, env)
     assert code == 0 and "SKIPPED" in err
     assert session.read_bytes() == before + extra.encode()
@@ -490,7 +490,7 @@ def test_ctrl_c_prints_backup_dir_exit_130(monkeypatch, capsys, env, session, wh
     before = session.read_bytes()
     write_session(env.projects / "-proj" / "s2.jsonl", pasted_image(b64()))
     real_replace = os.replace
-    real_process = strip_images.process
+    real_process = transcript_cleanup.process
     calls = []
 
     if when == "second_file":
@@ -501,14 +501,14 @@ def test_ctrl_c_prints_backup_dir_exit_130(monkeypatch, capsys, env, session, wh
                 raise KeyboardInterrupt
             return real_process(f, *a)
 
-        monkeypatch.setattr(strip_images, "process", process)
+        monkeypatch.setattr(transcript_cleanup, "process", process)
     else:
 
         def replace(src, dst):
             real_replace(src, dst)
             raise KeyboardInterrupt
 
-        monkeypatch.setattr(strip_images.os, "replace", replace)
+        monkeypatch.setattr(transcript_cleanup.os, "replace", replace)
     code, out, err = apply(monkeypatch, capsys, env)
     assert code == 130
     assert str(env.backup) in out + err
@@ -518,7 +518,7 @@ def test_ctrl_c_prints_backup_dir_exit_130(monkeypatch, capsys, env, session, wh
 
 def test_validation_identity_guard(monkeypatch, capsys, env, session):
     before = session.read_bytes()
-    real_walk = strip_images.Stripper.walk
+    real_walk = transcript_cleanup.Stripper.walk
 
     def walk(self, obj, *a, **k):
         out = real_walk(self, obj, *a, **k)
@@ -526,7 +526,7 @@ def test_validation_identity_guard(monkeypatch, capsys, env, session):
             out = dict(out, uuid="changed")
         return out
 
-    monkeypatch.setattr(strip_images.Stripper, "walk", walk)
+    monkeypatch.setattr(transcript_cleanup.Stripper, "walk", walk)
     code, _, err = apply(monkeypatch, capsys, env)
     assert code == 1 and "ERROR" in err
     assert session.read_bytes() == before
@@ -770,7 +770,7 @@ def test_system_lone_surrogate_record(monkeypatch, capsys, env):
 
 def _corrupt(case):
     """A system_stage replacement that makes one specific mistake."""
-    real = strip_images.system_stage
+    real = transcript_cleanup.system_stage
 
     def stage(lines):
         out = real(lines)
@@ -805,7 +805,7 @@ def _corrupt(case):
             recs[j]["rendered"] = [{"content": ""}]
         elif case == "extra_line":
             recs.append(recs[i])
-        return [strip_images.encode(r) + b"\n" for r in recs]
+        return [transcript_cleanup.encode(r) + b"\n" for r in recs]
 
     return stage
 
@@ -824,7 +824,7 @@ def _corrupt(case):
 def test_check_system_rejects(monkeypatch, capsys, env, case):
     f = system_session(env.projects / "-proj" / "s1.jsonl")
     before = f.read_bytes()
-    monkeypatch.setattr(strip_images, "system_stage", _corrupt(case))
+    monkeypatch.setattr(transcript_cleanup, "system_stage", _corrupt(case))
     code, _, err = apply(monkeypatch, capsys, env, "--clean", "system-data")
     assert code == 1 and "ERROR" in err and "system-data check" in err
     assert f.read_bytes() == before and backups(env) == [] and no_tmp(env)
@@ -841,9 +841,9 @@ def test_check_system_rejects_listing_without_copy(monkeypatch, capsys, env, cas
     def stage(lines):  # empties the only copy
         o = json.loads(lines[0])
         o["attachment"]["content"] = ""
-        return [strip_images.encode(o) + b"\n"]
+        return [transcript_cleanup.encode(o) + b"\n"]
 
-    monkeypatch.setattr(strip_images, "system_stage", stage)
+    monkeypatch.setattr(transcript_cleanup, "system_stage", stage)
     code, _, err = apply(monkeypatch, capsys, env, "--clean", "system-data")
     assert code == 1 and "no copy in rendered" in err
     assert f.read_bytes() == before and backups(env) == []
@@ -897,11 +897,11 @@ def test_clean_all(monkeypatch, capsys, env):
 def test_process_reports_exact_bytes_per_kind(env):
     f = mixed_session(env)
     size0 = f.stat().st_size
-    b, n, blocks, img, sysd = strip_images.process(str(f), False, str(env.backup))
+    b, n, blocks, img, sysd = transcript_cleanup.process(str(f), False, str(env.backup))
     assert (b, blocks) == (size0, 1) and img > 0 and sysd > 0 and n == b - img - sysd
-    strip_images.process(str(f), True, str(env.backup / "1"), "images")
+    transcript_cleanup.process(str(f), True, str(env.backup / "1"), "images")
     assert f.stat().st_size == size0 - img
-    strip_images.process(str(f), True, str(env.backup / "2"), "system-data")
+    transcript_cleanup.process(str(f), True, str(env.backup / "2"), "system-data")
     assert f.stat().st_size == size0 - img - sysd
 
 
@@ -929,9 +929,11 @@ def test_system_only_frees_image_copies_in_blobs(env):
     blob = dict(api_blob(), message={"role": "user", "content": [img_block(b64(n=30000))]})
     f = compact(env.projects / "-proj" / "s1.jsonl", [blob])
     size0 = f.stat().st_size
-    _, _, blocks, img, sysd = strip_images.process(str(f), False, str(env.backup))
+    _, _, blocks, img, sysd = transcript_cleanup.process(str(f), False, str(env.backup))
     assert blocks == 1 and img > sysd > 0
-    _, _, blocks2, img2, sysd2 = strip_images.process(str(f), True, str(env.backup), "system-data")
+    _, _, blocks2, img2, sysd2 = transcript_cleanup.process(
+        str(f), True, str(env.backup), "system-data"
+    )
     assert (blocks2, img2) == (0, 0) and sysd2 == size0 == img + sysd
     assert f.stat().st_size == 0
 
