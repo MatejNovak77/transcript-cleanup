@@ -1,6 +1,6 @@
 {
   "name": "transcript-cleanup",
-  "description": "Strip base64 images from Claude Code conversation history while keeping it resumable.",
+  "description": "Strip base64 images and repeated system data from Claude Code conversation history while keeping it resumable.",
   "owner": {
     "name": "Matěj Novák"
   },
@@ -8,7 +8,7 @@
     {
       "name": "transcript-cleanup",
       "source": "./",
-      "description": "Map and strip base64 images embedded in Claude Code conversation history, keeping the history and --resume intact."
+      "description": "Map and strip base64 images and repeated system data (saved API request records) from Claude Code conversation history, keeping the history and --resume intact."
     }
   ]
 }

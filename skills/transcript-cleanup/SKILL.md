@@ -31,7 +31,7 @@ Built-in safety:
 
 2. **Live sessions.** If the "skipped (live/recent)" column holds a significant share, name those projects and offer to re-run once the user has closed those sessions. The session you are running in is always skipped, which is expected.
 
-3. **Approval.** Ask which kinds to remove — images, system data, or both — and do not rewrite anything until the user explicitly approves that specific scope (kinds, and everything or the named projects).
+3. **Approval.** Ask which kinds to remove — images, system data, or both (system data is counted after images; API request records can hold image copies, so system data alone frees more than its column when images remain) — and do not rewrite anything until the user explicitly approves that specific scope (kinds, and everything or the named projects).
 
 4. **Apply** with the same filters used for mapping:
    ```

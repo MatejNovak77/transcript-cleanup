@@ -874,7 +874,8 @@ def test_default_clean_is_images_only(monkeypatch, capsys, env):
     for a, b in zip(before, after):  # only the image-carrying line changes
         assert a == b or b'"base64"' in a
     assert sum(a != b for a, b in zip(before, after)) == 1
-    assert "| - |" in out  # system data column not selected
+    row = next(x for x in out.splitlines() if x.startswith("| **total**")).split("|")
+    assert row[5].strip() != "-" and row[6].strip() == "-"  # system data column not selected
 
 
 def test_clean_system_data_keeps_images(monkeypatch, capsys, env):
@@ -919,7 +920,20 @@ def test_apply_unselected_column_dash(monkeypatch, capsys, env):
     _, out, _ = apply(monkeypatch, capsys, env, "--clean", "system-data")
     row = next(x for x in out.splitlines() if x.startswith("| **total**")).split("|")
     assert row[5].strip() == "-" and row[6].strip() != "-"
+    assert row[3].strip() == row[4].strip() == "-"  # images were not scanned
     assert "images freed MB" in out
+
+
+def test_system_only_frees_image_copies_in_blobs(env):
+    """Documented attribution: a blob's image counts as images; system data alone frees it too."""
+    blob = dict(api_blob(), message={"role": "user", "content": [img_block(b64(n=30000))]})
+    f = compact(env.projects / "-proj" / "s1.jsonl", [blob])
+    size0 = f.stat().st_size
+    _, _, blocks, img, sysd = strip_images.process(str(f), False, str(env.backup))
+    assert blocks == 1 and img > sysd > 0
+    _, _, blocks2, img2, sysd2 = strip_images.process(str(f), True, str(env.backup), "system-data")
+    assert (blocks2, img2) == (0, 0) and sysd2 == size0 == img + sysd
+    assert f.stat().st_size == 0
 
 
 def test_system_dry_run_writes_nothing(monkeypatch, capsys, env):

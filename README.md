@@ -80,7 +80,7 @@ python3 skills/transcript-cleanup/scripts/strip_images.py --apply --clean system
 python3 skills/transcript-cleanup/scripts/strip_images.py --apply --clean all   # both
 ```
 
-The report always shows both kinds; `--clean` (default `images`) only selects what `--apply` removes. System data is counted after images, so the two columns add up.
+The report always shows both kinds; `--clean` (default `images`) only selects what `--apply` removes. System data is counted after images, so the two columns add up to what `--clean all` frees. API request records can hold copies of images; those copies count as images in the report, so `--clean system-data` alone frees more than its column shows.
 
 Example report (illustrative):
 

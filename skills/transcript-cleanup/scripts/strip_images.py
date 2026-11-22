@@ -503,6 +503,7 @@ def main():
         a.clean in ("system-data", "all") or not a.apply,
     )
     col = lambda x, on: mb(x) if on else "-"
+    cnt = lambda x: x if shown[0] else "-"  # images were not scanned
     print(
         f"| project | total MB | sessions with images | image blocks | images {verb} MB "
         f"| system data {verb} MB | skipped (live/recent) MB |"
@@ -513,11 +514,11 @@ def main():
         tot = [x + y for x, y in zip(tot, r)]
         if r[1] or r[2] or r[3] or r[4] > 1_000_000:
             print(
-                f"| {project_label(p)} | {mb(r[5])} | {r[0]} | {r[1]} | {col(r[2], shown[0])} "
+                f"| {project_label(p)} | {mb(r[5])} | {cnt(r[0])} | {cnt(r[1])} | {col(r[2], shown[0])} "
                 f"| {col(r[3], shown[1])} | {mb(r[4])} |"
             )
     print(
-        f"| **total** | {mb(tot[5])} | {tot[0]} | {tot[1]} | {col(tot[2], shown[0])} "
+        f"| **total** | {mb(tot[5])} | {cnt(tot[0])} | {cnt(tot[1])} | {col(tot[2], shown[0])} "
         f"| {col(tot[3], shown[1])} | {mb(tot[4])} |"
     )
     if a.apply and (tot[2] or tot[3]):
