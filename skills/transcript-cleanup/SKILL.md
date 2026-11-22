@@ -31,22 +31,24 @@ Built-in safety:
 
 2. **Live sessions.** If the "skipped (live/recent)" column holds a significant share, name those projects and offer to re-run once the user has closed those sessions. The session you are running in is always skipped, which is expected.
 
-3. **Approval.** Ask which kinds to remove — images, system data, or both (system data is counted after images; API request records can hold image copies, so system data alone frees more than its column when images remain) — and do not rewrite anything until the user explicitly approves that specific scope (kinds, and everything or the named projects).
+3. **Age limit.** If the user named an age ("only older than 3 months", "keep the last month"), use it. Otherwise ask, per kind (images / system data), whether to clean only sessions older than some age, suggesting 3 months (90 days); one limit for both is fine. Pass it in days: `--older-than DAYS` for both kinds, or `--images-older-than DAYS` / `--system-older-than DAYS` for one kind. Age = last activity of the session; the dry run with the same options shows what a limit leaves alone (`younger than limit MB`).
 
-4. **Apply** with the same filters used for mapping:
+4. **Approval.** Ask which kinds to remove — images, system data, or both (system data is counted after images; API request records can hold image copies, so system data alone frees more than its column when images remain) — and do not rewrite anything until the user explicitly approves that specific scope (kinds, and everything or the named projects).
+
+5. **Apply** with the same filters and age limits used for mapping:
    ```
-   python3 -I "<skill-dir>/scripts/strip_images.py" --apply --clean images|system-data|all [--project …]
+   python3 -I "<skill-dir>/scripts/strip_images.py" --apply --clean images|system-data|all [--older-than DAYS …] [--project …]
    ```
    Without `--clean`, `--apply` strips images only.
    The script prints the backup folder.
 
-5. **Verify.** Check that the largest stripped session still loads, without appending to it. Tell the user first that this sends the resumed session to the model — it costs tokens (a lot for a big session, even with haiku) — and runs under that project's hooks and settings; skip it or pick a smaller session if they prefer. Run this from that session's original working directory (the `cwd` field in its JSONL):
+6. **Verify.** Check that the largest stripped session still loads, without appending to it. Tell the user first that this sends the resumed session to the model — it costs tokens (a lot for a big session, even with haiku) — and runs under that project's hooks and settings; skip it or pick a smaller session if they prefer. Run this from that session's original working directory (the `cwd` field in its JSONL):
    ```
    cd "<cwd>" && claude -p --resume <session-id> --fork-session --model haiku "In one sentence: how did this conversation end?"
    ```
    The fork creates a new `.jsonl` in that project directory: the newest one, containing the question. Move it into the same backup folder.
 
-6. **Summarize:** how much space will be freed once the backup is emptied, the backup folder path, and what was skipped. Do not empty the Trash or delete the backup yourself. That is the user's safety net.
+7. **Summarize:** how much space will be freed once the backup is emptied, the backup folder path, and what was skipped. Do not empty the Trash or delete the backup yourself. That is the user's safety net.
 
 ## Notes
 - Re-running is safe: already-cleaned files have nothing left to remove.

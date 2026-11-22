@@ -955,3 +955,99 @@ def test_system_live_and_recent_skipped(monkeypatch, capsys, env):
     before = (live.read_bytes(), recent.read_bytes())
     apply(monkeypatch, capsys, env, "--clean", "all")
     assert (live.read_bytes(), recent.read_bytes()) == before and backups(env) == []
+
+
+# ---------------------------------------------------------------- age limits
+
+DAY = 86400
+
+
+def age(path, days):
+    t = time.time() - days * DAY
+    os.utime(path, (t, t))
+    return path
+
+
+def big(f, days):
+    """Append a 2.5 MB API request blob (so the MB columns are non-zero), then set the age."""
+    blob = dict(
+        api_blob(), message={"role": "user", "content": [{"type": "text", "text": "z" * 2_500_000}]}
+    )
+    with open(f, "ab") as h:
+        h.write(json.dumps(blob, separators=(",", ":")).encode() + b"\n")
+    return age(f, days)
+
+
+def total_row(out):
+    return [
+        c.strip()
+        for c in next(x for x in out.splitlines() if x.startswith("| **total**")).split("|")
+    ]
+
+
+@pytest.mark.parametrize("days, cleaned", [(89.9, False), (90.1, True)])
+def test_age_limit_boundary(monkeypatch, capsys, env, days, cleaned):
+    f = age(mixed_session(env), days)
+    before = f.read_bytes()
+    code, _, _ = apply(monkeypatch, capsys, env, "--clean", "all", "--older-than", "90")
+    assert code == 0 and (f.read_bytes() != before) == cleaned
+
+
+def test_age_limit_per_kind(monkeypatch, capsys, env):
+    f = big(mixed_session(env), 30)  # images: any age; system data: only after 90 days
+    code, out, _ = apply(monkeypatch, capsys, env, "--clean", "all", "--system-older-than", "90")
+    assert code == 0 and len(placeholders(f)) == 1
+    assert sum(kind(x).startswith("api-request") for x in raw_lines(f)) == 6
+    assert "age limits (last activity): images no limit; system data older than 90 days" in out
+    row = total_row(out)
+    assert row[8] != "0"  # younger than limit MB: the file kept its system data
+
+
+def test_per_kind_option_overrides_older_than(monkeypatch, capsys, env):
+    f = age(mixed_session(env), 30)
+    apply(
+        monkeypatch, capsys, env, "--clean", "all", "--older-than", "90", "--images-older-than", "7"
+    )
+    assert len(placeholders(f)) == 1  # images: 30 > 7 days
+    assert sum(kind(x).startswith("api-request") for x in raw_lines(f)) == 5  # system: 30 < 90
+
+
+def test_no_limit_report_unchanged(monkeypatch, capsys, env):
+    big(mixed_session(env), 1)
+    _, out, _ = run(monkeypatch, capsys)
+    assert "age limits" not in out and "younger than limit" not in out
+    header = next(x for x in out.splitlines() if x.startswith("| project"))
+    assert header.count("|") == 8
+    assert total_row(out)[4] == "1" and total_row(out)[6] != "0"  # both kinds counted
+
+
+def test_subagent_age_follows_session(monkeypatch, capsys, env):
+    main = age(system_session(env.projects / "-proj" / "s1.jsonl"), 5)  # recent activity
+    sub = age(system_session(env.projects / "-proj" / "s1" / "subagents" / "agent-a1.jsonl"), 200)
+    old = age(system_session(env.projects / "-proj" / "s2.jsonl"), 200)
+    snap = {p: p.read_bytes() for p in (main, sub)}
+    apply(monkeypatch, capsys, env, "--clean", "system-data", "--older-than", "90")
+    assert {p: p.read_bytes() for p in (main, sub)} == snap  # session s1 was active 5 days ago
+    assert not any(kind(x).startswith("api-request") for x in raw_lines(old))
+
+
+def test_live_counted_as_live_not_age(monkeypatch, capsys, env):
+    big(system_session(env.projects / "-proj" / "s1.jsonl"), 1 / 1440)  # one minute old
+    _, out, _ = run(monkeypatch, capsys, "--older-than", "90")
+    row = total_row(out)
+    assert row[7] != "0" and row[8] == "0"  # skipped (live/recent) vs younger than limit
+
+
+def test_apply_keeps_age(monkeypatch, capsys, env):
+    f = big(mixed_session(env), 100)
+    mtime = f.stat().st_mtime_ns
+    apply(monkeypatch, capsys, env, "--clean", "images", "--older-than", "90")
+    assert f.stat().st_mtime_ns == mtime and len(placeholders(f)) == 1
+    _, out, _ = run(monkeypatch, capsys, "--older-than", "90")
+    assert total_row(out)[8] == "0" and total_row(out)[6] != "0"  # still old: system data savable
+
+
+def test_apply_age_column_counts_selected_kind_only(monkeypatch, capsys, env):
+    big(mixed_session(env), 30)
+    _, out, _ = apply(monkeypatch, capsys, env, "--clean", "images", "--system-older-than", "90")
+    assert total_row(out)[8] == "0"  # system data not selected: its limit leaves nothing alone

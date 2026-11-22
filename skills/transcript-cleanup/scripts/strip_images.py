@@ -33,6 +33,7 @@ Safety:
 
 Usage:
   strip_images.py [--apply [--clean images|system-data|all]] [--project NAME ...]
+                  [--older-than DAYS] [--images-older-than DAYS] [--system-older-than DAYS]
                   [--min-age 30] [-v] [PATH ...]
 
 PATH is a .jsonl file or a directory; default is the projects directory under
@@ -82,12 +83,16 @@ def live_sessions():
     return ids
 
 
-def session_id(f):
-    """<sid>.jsonl -> sid; <sid>/subagents/agent-*.jsonl -> sid."""
+def session_base(f):
+    """<dir>/<sid>.jsonl -> <dir>/<sid>; <dir>/<sid>/subagents/agent-*.jsonl -> <dir>/<sid>."""
     parent = os.path.dirname(f)
     if os.path.basename(parent) == "subagents":
-        return os.path.basename(os.path.dirname(parent))
-    return os.path.basename(f)[: -len(".jsonl")]
+        return os.path.dirname(parent)
+    return f[: -len(".jsonl")]
+
+
+def session_id(f):
+    return os.path.basename(session_base(f))
 
 
 class Stripper:
@@ -353,17 +358,21 @@ def image_stage(raw):
     return out, s.count
 
 
-def process(f, apply, backup_root, clean="images"):
+ALL_KINDS = ("images", "system-data")
+
+
+def process(f, apply, backup_root, clean="images", kinds=ALL_KINDS):
     """Return (bytes_before, bytes_after, image_blocks, image_bytes, system_bytes).
 
     A dry run measures both kinds (images first, then system data on the result); --apply runs
-    and writes only the kinds selected by `clean` ("images", "system-data" or "all").
+    and writes only the kinds selected by `clean` ("images", "system-data" or "all"). Kinds not
+    in `kinds` (e.g. too young for their age limit) are not run at all.
     """
     st0 = os.stat(f)  # before reading, so any later append is detected
     with open(f, "rb") as h:
         raw = h.read().splitlines(keepends=True)
-    run_img = not apply or clean in ("images", "all")
-    run_sys = not apply or clean in ("system-data", "all")
+    run_img = (not apply or clean in ("images", "all")) and "images" in kinds
+    run_sys = (not apply or clean in ("system-data", "all")) and "system-data" in kinds
     size = lambda ls: sum(map(len, ls))
     lines, blocks = image_stage(raw) if run_img else (raw, 0)
     img = size(raw) - size(lines)
@@ -414,6 +423,19 @@ def main():
         metavar="NAME",
         help="only project dirs whose name contains NAME (repeatable)",
     )
+    for opt, what in (
+        ("--older-than", "both kinds"),
+        ("--images-older-than", "images (overrides --older-than)"),
+        ("--system-older-than", "system data (overrides --older-than)"),
+    ):
+        ap.add_argument(
+            opt,
+            type=float,
+            default=None,
+            metavar="DAYS",
+            help=f"clean {what} only in sessions whose last activity is more than DAYS days ago "
+            "(default: no limit)",
+        )
     ap.add_argument(
         "--min-age",
         type=float,
@@ -448,13 +470,32 @@ def main():
     if a.project:
         files = [f for f in files if any(x in proj_of(f) for x in a.project)]
 
+    limits = {  # kind -> age limit in seconds, or None
+        "images": a.images_older_than if a.images_older_than is not None else a.older_than,
+        "system-data": a.system_older_than if a.system_older_than is not None else a.older_than,
+    }
+    limits = {k: None if v is None else v * 86400 for k, v in limits.items()}
+    limited = any(v is not None for v in limits.values())
+    relevant = [  # kinds this run would clean: both in a dry run, the selected ones under --apply
+        k for k in ALL_KINDS if not a.apply or a.clean == "all" or a.clean == k
+    ]
+    last_activity = {}  # session -> newest mtime of its files (main transcript and subagents)
+    for f in files:
+        try:
+            m = os.stat(f).st_mtime
+        except OSError:
+            continue
+        key = session_base(f)
+        last_activity[key] = max(m, last_activity.get(key, m))
+
     live = live_sessions()
     backup = os.path.join(
         a.backup_dir or default_backup_root(),
         f"claude-transcripts-{datetime.datetime.now():%Y%m%d-%H%M%S}",
     )
     now = datetime.datetime.now().timestamp()
-    rows = {}  # project -> [sessions_with_images, blocks, image_bytes, system_bytes, skipped, total]
+    # project -> [sessions_with_images, blocks, image_bytes, system_bytes, skipped, total, too young]
+    rows = {}
     errors = 0
     try:
         for f in files:
@@ -462,13 +503,19 @@ def main():
                 st = os.stat(f)
             except OSError:
                 continue  # vanished while scanning
-            r = rows.setdefault(proj_of(f), [0, 0, 0, 0, 0, 0])
+            r = rows.setdefault(proj_of(f), [0, 0, 0, 0, 0, 0, 0])
             r[5] += st.st_size
             if session_id(f) in live or now - st.st_mtime < a.min_age * 60:
                 r[4] += st.st_size
                 continue
+            age = now - last_activity.get(session_base(f), st.st_mtime)
+            kinds = [k for k in ALL_KINDS if limits[k] is None or age > limits[k]]
+            if any(k not in kinds for k in relevant):
+                r[6] += st.st_size  # at least one kind left alone because of age
+            if not any(k in kinds for k in relevant):
+                continue
             try:
-                b, n, c, img, sysd = process(f, a.apply, backup, a.clean)
+                b, n, c, img, sysd = process(f, a.apply, backup, a.clean, kinds)
             except Changed as e:
                 print(f"SKIPPED {f}: {e}", file=sys.stderr)
                 r[4] += st.st_size
@@ -504,22 +551,32 @@ def main():
     )
     col = lambda x, on: mb(x) if on else "-"
     cnt = lambda x: x if shown[0] else "-"  # images were not scanned
+    age_col = lambda r: f" {mb(r[6])} |" if limited else ""
+    if limited:
+        days = lambda k: (
+            f"older than {limits[k] / 86400:g} days" if limits[k] is not None else "no limit"
+        )
+        print(
+            f"age limits (last activity): images {days('images')}; "
+            f"system data {days('system-data')}\n"
+        )
     print(
         f"| project | total MB | sessions with images | image blocks | images {verb} MB "
         f"| system data {verb} MB | skipped (live/recent) MB |"
+        + (" younger than limit MB |" if limited else "")
     )
-    print("|---|---:|---:|---:|---:|---:|---:|")
-    tot = [0] * 6
+    print("|---|---:|---:|---:|---:|---:|---:|" + ("---:|" if limited else ""))
+    tot = [0] * 7
     for p, r in sorted(rows.items(), key=lambda kv: -(kv[1][2] + kv[1][3] + kv[1][4])):
         tot = [x + y for x, y in zip(tot, r)]
-        if r[1] or r[2] or r[3] or r[4] > 1_000_000:
+        if r[1] or r[2] or r[3] or r[4] > 1_000_000 or r[6] > 1_000_000:
             print(
                 f"| {project_label(p)} | {mb(r[5])} | {cnt(r[0])} | {cnt(r[1])} | {col(r[2], shown[0])} "
-                f"| {col(r[3], shown[1])} | {mb(r[4])} |"
+                f"| {col(r[3], shown[1])} | {mb(r[4])} |" + age_col(r)
             )
     print(
         f"| **total** | {mb(tot[5])} | {cnt(tot[0])} | {cnt(tot[1])} | {col(tot[2], shown[0])} "
-        f"| {col(tot[3], shown[1])} | {mb(tot[4])} |"
+        f"| {col(tot[3], shown[1])} | {mb(tot[4])} |" + age_col(tot)
     )
     if a.apply and (tot[2] or tot[3]):
         print(f"\noriginals kept in: {backup}")

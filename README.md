@@ -78,9 +78,13 @@ python3 skills/transcript-cleanup/scripts/strip_images.py --project my-app -v   
 python3 skills/transcript-cleanup/scripts/strip_images.py --apply               # strip images
 python3 skills/transcript-cleanup/scripts/strip_images.py --apply --clean system-data   # system data only
 python3 skills/transcript-cleanup/scripts/strip_images.py --apply --clean all   # both
+python3 skills/transcript-cleanup/scripts/strip_images.py --apply --clean all --older-than 90   # only sessions idle for 90+ days
+python3 skills/transcript-cleanup/scripts/strip_images.py --apply --clean all --system-older-than 90   # images of any age, system data after 90 days
 ```
 
 The report always shows both kinds; `--clean` (default `images`) only selects what `--apply` removes. System data is counted after images, so the two columns add up to what `--clean all` frees. API request records can hold copies of images; those copies count as images in the report, so `--clean system-data` alone frees more than its column shows.
+
+**Age limits.** `--older-than DAYS` cleans only sessions whose last activity is more than DAYS days ago; `--images-older-than` and `--system-older-than` set a limit for one kind and override `--older-than`. Without a limit every session is cleaned, as before. A session's last activity is the newest modification time of its transcript and its subagent transcripts — the time of its last message. The cleanup preserves modification times, so a run never makes a session look younger. With a limit, the report states the limits and adds a `younger than limit MB` column: files that at least one selected kind left alone because of age. This is separate from the live/recent guard (`--min-age`, 30 minutes), which always applies first.
 
 Example report (illustrative):
 
