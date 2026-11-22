@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Map and strip embedded base64 images/PDFs from Claude Code session transcripts.
+"""Map and strip embedded base64 images/PDFs and repeated system data from Claude Code transcripts.
 
 Claude Code stores every image it reads (Read tool, screenshots, pastes) inside
 the session JSONL as base64 -- twice: once in `message.content` (what the model
@@ -12,6 +12,11 @@ the UI duplicate to a 1x1 PNG. Every record keeps its uuid, timestamp and order;
 the file's mtime is preserved, so `claude --resume` keeps working and listing
 order does not change.
 
+With --clean system-data (or all) it also removes repeated system data: the
+api-request / -blob / -shape records (no uuid, not in the conversation chain)
+and the skill_listing text that the record's `rendered` copy repeats.
+prompt_snapshot and instructions records are kept: a resume reads them.
+
 Safety:
   * dry-run report by default; nothing is written without --apply
   * sessions of running `claude` processes and files modified in the last
@@ -20,13 +25,15 @@ Safety:
     ~/.local/share/transcript-image-cleanup/backups elsewhere) as a hard link,
     or a copy when that directory is on another volume; an existing backup is
     never overwritten; undo = move the backup back
-  * each rewritten file is validated (same line count, same record uuids/types,
-    every line parses); a file that changed while being processed is skipped;
-    the stripped version then replaces the original in one atomic rename
+  * each rewritten file is validated (images: same record uuids/types, every
+    line parses; system data: every other line byte-identical and in order);
+    a file that changed while being processed is skipped; the cleaned version
+    then replaces the original in one atomic rename
   * macOS and Linux only (live-session detection uses POSIX signals)
 
 Usage:
-  strip_images.py [--apply] [--project NAME ...] [--min-age 30] [-v] [PATH ...]
+  strip_images.py [--apply [--clean images|system-data|all]] [--project NAME ...]
+                  [--min-age 30] [-v] [PATH ...]
 
 PATH is a .jsonl file or a directory; default is the projects directory under
 $CLAUDE_CONFIG_DIR (or ~/.claude). Requires Python 3.8+, no dependencies.
@@ -156,6 +163,104 @@ def tool_paths(records):
     return m
 
 
+# System data (measured on Claude Code 2.1.330; see README "System data"). Only these exact kinds
+# are touched; anything else -- including prompt_snapshot and instructions, which a resume reads
+# -- is passed through byte for byte.
+SYSTEM_DROP = frozenset(("api-request", "api-request-blob", "api-request-shape"))
+SYSTEM_MARKERS = (b'"type":"api-request', b'"type":"skill_listing"')  # pre-filter, speed only
+
+
+def encode(obj):
+    """Compact JSON as Claude Code writes it; a lone surrogate (half an emoji) stays escaped."""
+    try:
+        return json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode()
+    except UnicodeEncodeError:
+        return json.dumps(obj, separators=(",", ":")).encode()
+
+
+def rendered_text(o):
+    """The text the model saw for an attachment record, or None if it has no usable copy."""
+    r = o.get("rendered")
+    if not isinstance(r, list) or not all(
+        isinstance(x, dict) and isinstance(x.get("content"), str) for x in r
+    ):
+        return None
+    return "".join(x["content"] for x in r)
+
+
+def system_stage(lines):
+    """Drop uuid-less api-request records; empty skill_listing text that `rendered` repeats.
+
+    Returns the new list of lines. Lines that are not cleaned are passed through unchanged.
+    """
+    out = []
+    for line in lines:
+        if not any(m in line for m in SYSTEM_MARKERS):
+            out.append(line)
+            continue
+        o = json.loads(line)
+        if not isinstance(o, dict):
+            out.append(line)
+        elif o.get("type") in SYSTEM_DROP and "uuid" not in o:
+            continue  # not part of the conversation chain: nothing points to it by uuid
+        elif is_skill_listing(o) and removable_listing(o):
+            o["attachment"]["content"] = ""
+            out.append(encode(o) + b"\n")
+        else:
+            out.append(line)
+    return out
+
+
+def is_skill_listing(o):
+    return o.get("type") == "attachment" and (
+        isinstance(o.get("attachment"), dict) and o["attachment"].get("type") == "skill_listing"
+    )
+
+
+def removable_listing(o):
+    c = o["attachment"].get("content")
+    rt = rendered_text(o)
+    return isinstance(c, str) and c != "" and rt is not None and c in rt
+
+
+def check_system(old, new):
+    """Raise unless `new` is `old` minus droppable records and with skill_listing text emptied.
+
+    Written independently of system_stage: every other line must be byte-identical and in order.
+    """
+    j = 0
+    for line in old:
+        if j < len(new) and new[j] == line:
+            j += 1
+            continue
+        o = json.loads(line)
+        if isinstance(o, dict) and o.get("type") in SYSTEM_DROP and "uuid" not in o:
+            continue  # dropped
+        if j >= len(new):
+            raise RuntimeError("system-data check: a record was removed")
+        n = json.loads(new[j])
+        j += 1
+        if not (isinstance(o, dict) and isinstance(n, dict) and is_skill_listing(o)):
+            raise RuntimeError("system-data check: a non-system record changed")
+        oa, na = o["attachment"], n.get("attachment")
+        r = o.get("rendered")
+        if not (
+            isinstance(na, dict)
+            and na.get("content") == ""
+            and isinstance(oa.get("content"), str)
+            and oa["content"]
+            and isinstance(r, list)
+            and all(isinstance(x, dict) and isinstance(x.get("content"), str) for x in r)
+            and oa["content"] in "".join(x["content"] for x in r)
+            and n.get("rendered") == r
+        ):
+            raise RuntimeError("system-data check: skill_listing text has no copy in rendered")
+        if dict(o, attachment=dict(oa, content=None)) != dict(n, attachment=dict(na, content=None)):
+            raise RuntimeError("system-data check: other fields changed")
+    if j != len(new):
+        raise RuntimeError("system-data check: unexpected extra lines")
+
+
 class Changed(Exception):
     """The transcript changed while it was being processed."""
 
@@ -221,13 +326,10 @@ def swap_in(f, new, st0, dest):
             os.remove(tmp)
 
 
-def process(f, apply, backup_root):
-    """Return (bytes_before, bytes_after, blocks_replaced); 0s if nothing to do."""
-    st0 = os.stat(f)  # before reading, so any later append is detected
-    with open(f, "rb") as h:
-        raw = h.read().splitlines(keepends=True)
+def image_stage(raw):
+    """Replace embedded images/PDFs; return (lines, blocks replaced). Unchanged lines pass through."""
     if not any(b'"base64"' in line for line in raw):
-        return 0, 0, 0
+        return raw, 0
     parsed = [json.loads(line) if line.strip() else None for line in raw]
     s = Stripper(tool_paths([p for p in parsed if p]))
     out = []
@@ -237,16 +339,9 @@ def process(f, apply, backup_root):
             continue
         before = s.removed
         n = s.walk(o)
-        if s.removed > before:
-            try:
-                enc = json.dumps(n, ensure_ascii=False, separators=(",", ":")).encode()
-            except UnicodeEncodeError:  # lone surrogate (half an emoji): keep it escaped
-                enc = json.dumps(n, separators=(",", ":")).encode()
-            out.append(enc + b"\n")
-        else:
-            out.append(line)
+        out.append(encode(n) + b"\n" if s.removed > before else line)
     if not s.removed:
-        return 0, 0, 0
+        return raw, 0
 
     if len(out) != len(raw):
         raise RuntimeError("line count changed")
@@ -255,11 +350,34 @@ def process(f, apply, backup_root):
             nb = json.loads(b)
             if nb.get("uuid") != a.get("uuid") or nb.get("type") != a.get("type"):
                 raise RuntimeError("record identity changed")
+    return out, s.count
 
-    new = b"".join(out)
+
+def process(f, apply, backup_root, clean="images"):
+    """Return (bytes_before, bytes_after, image_blocks, image_bytes, system_bytes).
+
+    A dry run measures both kinds (images first, then system data on the result); --apply runs
+    and writes only the kinds selected by `clean` ("images", "system-data" or "all").
+    """
+    st0 = os.stat(f)  # before reading, so any later append is detected
+    with open(f, "rb") as h:
+        raw = h.read().splitlines(keepends=True)
+    run_img = not apply or clean in ("images", "all")
+    run_sys = not apply or clean in ("system-data", "all")
+    size = lambda ls: sum(map(len, ls))
+    lines, blocks = image_stage(raw) if run_img else (raw, 0)
+    img = size(raw) - size(lines)
+    sys_saved = 0
+    if run_sys:
+        new = system_stage(lines)
+        check_system(lines, new)
+        sys_saved = size(lines) - size(new)
+        lines = new
+    if not img and not sys_saved:
+        return 0, 0, 0, 0, 0
     if apply:
-        swap_in(f, new, st0, backup_path(f, backup_root))
-    return sum(map(len, raw)), len(new), s.count
+        swap_in(f, b"".join(lines), st0, backup_path(f, backup_root))
+    return size(raw), size(lines), blocks, img, sys_saved
 
 
 def project_label(name):
@@ -282,6 +400,13 @@ def main():
         help=".jsonl files or directories (default: %(default)s)",
     )
     ap.add_argument("--apply", action="store_true", help="rewrite files (default: dry-run report)")
+    ap.add_argument(
+        "--clean",
+        choices=("images", "system-data", "all"),
+        default="images",
+        help="what --apply removes: embedded images/PDFs, repeated system data, or both "
+        "(default: %(default)s; a dry run always reports both)",
+    )
     ap.add_argument(
         "--project",
         action="append",
@@ -329,7 +454,7 @@ def main():
         f"claude-transcripts-{datetime.datetime.now():%Y%m%d-%H%M%S}",
     )
     now = datetime.datetime.now().timestamp()
-    rows = {}  # project -> [sessions_with_images, blocks, before, after, skipped, total]
+    rows = {}  # project -> [sessions_with_images, blocks, image_bytes, system_bytes, skipped, total]
     errors = 0
     try:
         for f in files:
@@ -343,7 +468,7 @@ def main():
                 r[4] += st.st_size
                 continue
             try:
-                b, n, c = process(f, a.apply, backup)
+                b, n, c, img, sysd = process(f, a.apply, backup, a.clean)
             except Changed as e:
                 print(f"SKIPPED {f}: {e}", file=sys.stderr)
                 r[4] += st.st_size
@@ -354,13 +479,13 @@ def main():
                 errors += 1
                 continue
             if b:
-                r[0] += 1
+                r[0] += bool(c)
                 r[1] += c
-                r[2] += b
-                r[3] += n
+                r[2] += img
+                r[3] += sysd
                 if a.verbose and b - n > 5_000_000:
                     print(
-                        f"{'stripped' if a.apply else 'would strip'} {b / 1e6:8.1f} -> {n / 1e6:7.1f} MB  "
+                        f"{'cleaned' if a.apply else 'would clean'} {b / 1e6:8.1f} -> {n / 1e6:7.1f} MB  "
                         f"{os.path.relpath(f, PROJECTS)}"
                     )
     except KeyboardInterrupt:
@@ -373,24 +498,35 @@ def main():
 
     mb = lambda x: f"{x / 1e6:,.0f}".replace(",", " ")
     verb = "freed" if a.apply else "savable"
-    print(
-        f"| project | total MB | sessions with images | image blocks | {verb} MB | skipped (live/recent) MB |"
+    shown = (  # under --apply, a kind that was not selected shows "-"
+        a.clean in ("images", "all") or not a.apply,
+        a.clean in ("system-data", "all") or not a.apply,
     )
-    print("|---|---:|---:|---:|---:|---:|")
+    col = lambda x, on: mb(x) if on else "-"
+    print(
+        f"| project | total MB | sessions with images | image blocks | images {verb} MB "
+        f"| system data {verb} MB | skipped (live/recent) MB |"
+    )
+    print("|---|---:|---:|---:|---:|---:|---:|")
     tot = [0] * 6
-    for p, r in sorted(rows.items(), key=lambda kv: -(kv[1][2] - kv[1][3] + kv[1][4])):
+    for p, r in sorted(rows.items(), key=lambda kv: -(kv[1][2] + kv[1][3] + kv[1][4])):
         tot = [x + y for x, y in zip(tot, r)]
-        if r[1] or r[2] or r[4] > 1_000_000:
+        if r[1] or r[2] or r[3] or r[4] > 1_000_000:
             print(
-                f"| {project_label(p)} | {mb(r[5])} | {r[0]} | {r[1]} | {mb(r[2] - r[3])} | {mb(r[4])} |"
+                f"| {project_label(p)} | {mb(r[5])} | {r[0]} | {r[1]} | {col(r[2], shown[0])} "
+                f"| {col(r[3], shown[1])} | {mb(r[4])} |"
             )
     print(
-        f"| **total** | {mb(tot[5])} | {tot[0]} | {tot[1]} | {mb(tot[2] - tot[3])} | {mb(tot[4])} |"
+        f"| **total** | {mb(tot[5])} | {tot[0]} | {tot[1]} | {col(tot[2], shown[0])} "
+        f"| {col(tot[3], shown[1])} | {mb(tot[4])} |"
     )
-    if a.apply and tot[2]:
+    if a.apply and (tot[2] or tot[3]):
         print(f"\noriginals kept in: {backup}")
-    elif not a.apply and tot[2]:
-        print("\ndry run -- nothing changed; re-run with --apply to strip")
+    elif not a.apply and (tot[2] or tot[3]):
+        print(
+            "\ndry run -- nothing changed; re-run with --apply to strip images, "
+            "--apply --clean system-data for system data, or --apply --clean all for both"
+        )
     sys.exit(1 if errors else 0)
 
 

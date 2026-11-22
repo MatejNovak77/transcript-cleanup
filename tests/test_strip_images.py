@@ -531,3 +531,413 @@ def test_validation_identity_guard(monkeypatch, capsys, env, session):
     assert code == 1 and "ERROR" in err
     assert session.read_bytes() == before
     assert backups(env) == [] and no_tmp(env)
+
+
+# ---------------------------------------------------------------- system data
+# Record shapes follow Claude Code 2.1.330 (key sets measured on real transcripts; content synthetic).
+
+SKILLS_TEXT = "- alpha-report: Use this skill to format weekly reports. " * 20
+
+
+def compact(path, records, age_min=120):
+    """Write records the way Claude Code does: compact JSON, raw UTF-8."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(
+        b"".join(
+            json.dumps(r, ensure_ascii=False, separators=(",", ":")).encode() + b"\n"
+            for r in records
+        )
+    )
+    t = time.time() - age_min * 60
+    os.utime(path, (t, t))
+    return path
+
+
+def attachment(att, rendered=None, **extra):
+    r = {
+        "parentUuid": str(uuid.uuid4()),
+        "isSidechain": False,
+        "attachment": att,
+        "type": "attachment",
+        "uuid": str(uuid.uuid4()),
+        "timestamp": "2026-01-01T00:00:00.000Z",
+    }
+    if rendered is not None:
+        r["rendered"] = rendered
+    r.update(extra)
+    return r
+
+
+def skill_listing(content=SKILLS_TEXT, rendered=True):
+    rend = [{"content": "The following skills are available:\n\n" + content}] if rendered else None
+    att = {"type": "skill_listing", "content": content, "skillCount": 1, "isInitial": True}
+    return attachment(att, rend)
+
+
+def prompt_snapshot():
+    att = {
+        "type": "prompt_snapshot",
+        "systemPrompt": ["You are a helpful agent. " * 40],
+        "tools": [{"name": "Read", "description": "Reads a file. " * 40}],
+    }
+    return attachment(att)
+
+
+def instructions():
+    text = "# Project notes\n" + "Keep functions small. " * 40
+    att = {
+        "type": "instructions",
+        "files": [{"path": "/p/CLAUDE.md", "type": "Project", "content": text}],
+    }
+    return attachment(att, [{"content": "Contents of /p/CLAUDE.md:\n" + text}])
+
+
+def api_request():
+    return {
+        "type": "api-request",
+        "id": "req_" + uuid.uuid4().hex,
+        "shapeHash": "s" * 16,
+        "tail": ["h" * 16],
+        "params": {"betas": ["x"] * 50, "safeguards": "y" * 2000},
+        "sessionId": "s1",
+        "timestamp": "2026-01-01T00:00:00.000Z",
+        "version": "2.1.330",
+    }
+
+
+def api_blob():
+    return {
+        "type": "api-request-blob",
+        "hash": "h" * 16,
+        "message": {"role": "user", "content": [{"type": "text", "text": "z" * 3000}]},
+        "sessionId": "s1",
+    }
+
+
+def api_shape():
+    return {
+        "type": "api-request-shape",
+        "shapeHash": "s" * 16,
+        "shape": {"tools": [{"name": "Read", "description": "d" * 3000}], "system": ["sys"]},
+        "sessionId": "s1",
+        "timestamp": "2026-01-01T00:00:00.000Z",
+        "version": "2.1.330",
+    }
+
+
+def conversation():
+    return [
+        rec("user", [{"type": "text", "text": "Remember 4711, café ✓"}]),
+        rec(
+            "assistant",
+            [{"type": "tool_use", "id": "t9", "name": "Bash", "input": {"command": "ls"}}],
+            requestRef="req_x",
+        ),
+        rec("user", [{"type": "tool_result", "tool_use_id": "t9", "content": "a\nb"}]),
+        rec("assistant", [{"type": "text", "text": "Done: 4711."}]),
+    ]
+
+
+def system_session(f, **kw):
+    conv = conversation()
+    recs = [skill_listing(), prompt_snapshot(), instructions(), conv[0], api_shape(), api_blob()]
+    recs += [api_request(), conv[1], conv[2], api_request(), api_blob(), conv[3]]
+    return compact(f, recs, **kw)
+
+
+def raw_lines(path):
+    return path.read_bytes().splitlines(keepends=True)
+
+
+def kind(line):
+    o = json.loads(line)
+    a = o.get("attachment")
+    return o["type"] + (":" + a["type"] if isinstance(a, dict) else "")
+
+
+def test_system_only_transcript_cleaned(monkeypatch, capsys, env):
+    f = system_session(env.projects / "-proj" / "s1.jsonl")
+    before, st = f.read_bytes(), f.stat()
+    code, out, err = apply(monkeypatch, capsys, env, "--clean", "system-data")
+    assert code == 0 and "ERROR" not in err
+    old, new = before.splitlines(keepends=True), raw_lines(f)
+    kept_old = [x for x in old if not kind(x).startswith("api-request")]
+    assert len(new) == len(kept_old) == len(old) - 5
+    for a, b in zip(kept_old, new):  # every other line byte-identical and in order
+        if kind(a) == "attachment:skill_listing":
+            oa, nb = json.loads(a), json.loads(b)
+            assert nb["attachment"]["content"] == "" and nb["rendered"] == oa["rendered"]
+            assert dict(nb, attachment=None) == dict(oa, attachment=None)
+        else:
+            assert a == b
+    assert [json.loads(x).get("uuid") for x in new] == [
+        json.loads(x).get("uuid") for x in old if "uuid" in json.loads(x)
+    ]
+    (bk,) = backups(env)
+    assert bk.read_bytes() == before
+    assert f.stat().st_mtime_ns == st.st_mtime_ns
+    assert "originals kept in" in out
+
+
+def test_system_rerun_is_noop(monkeypatch, capsys, env):
+    f = system_session(env.projects / "-proj" / "s1.jsonl")
+    apply(monkeypatch, capsys, env, "--clean", "system-data")
+    after, ino = f.read_bytes(), f.stat().st_ino
+    n_backups = len(backups(env))
+    code, out, _ = apply(monkeypatch, capsys, env, "--clean", "system-data")
+    assert code == 0 and f.read_bytes() == after and f.stat().st_ino == ino
+    assert len(backups(env)) == n_backups == 1
+    assert "originals kept in" not in out
+
+
+def test_system_record_with_uuid_never_dropped(monkeypatch, capsys, env):
+    chained = dict(api_request(), uuid=str(uuid.uuid4()))  # in the uuid chain: must stay
+    f = compact(env.projects / "-proj" / "s1.jsonl", [chained, api_blob()])
+    apply(monkeypatch, capsys, env, "--clean", "system-data")
+    assert [json.loads(x)["type"] for x in raw_lines(f)] == ["api-request"]
+
+
+@pytest.mark.parametrize(
+    "case", ["no_rendered", "not_contained", "rendered_not_list", "rendered_list_of_str", "empty"]
+)
+def test_skill_listing_needs_rendered_copy(monkeypatch, capsys, env, case):
+    r = {
+        "no_rendered": skill_listing(rendered=False),
+        "not_contained": skill_listing(),
+        "rendered_not_list": skill_listing(),
+        "rendered_list_of_str": skill_listing(),
+        "empty": skill_listing(content=""),
+    }[case]
+    if case == "not_contained":
+        r["rendered"] = [{"content": "a different listing"}]
+    if case == "rendered_not_list":
+        r["rendered"] = SKILLS_TEXT
+    if case == "rendered_list_of_str":  # unknown shape: leave alone
+        r["rendered"] = [SKILLS_TEXT]
+    f = compact(env.projects / "-proj" / "s1.jsonl", [r])
+    before = f.read_bytes()
+    code, _, _ = apply(monkeypatch, capsys, env, "--clean", "all")
+    assert code == 0 and f.read_bytes() == before and backups(env) == []
+
+
+def test_kept_kinds_untouched(monkeypatch, capsys, env):
+    other = [
+        prompt_snapshot(),  # a resume rebuilds the system prompt from it
+        instructions(),  # a resume compares it with CLAUDE.md on disk
+        attachment({"type": "deferred_tools_delta", "added": ["x" * 3000]}, [{"content": "x"}]),
+        rec("progress", "p" * 3000),
+        {"type": "file-history-snapshot", "snapshot": {"trackedFileBackups": {"a": "b" * 3000}}},
+        dict(api_request(), type="api-request-foo"),
+    ]
+    f = compact(env.projects / "-proj" / "s1.jsonl", other)
+    before = f.read_bytes()
+    code, out, _ = run(monkeypatch, capsys)
+    assert code == 0 and "| **total** | 0 | 0 | 0 | 0 | 0 | 0 |" in out
+    apply(monkeypatch, capsys, env, "--clean", "all")
+    assert f.read_bytes() == before
+
+
+def test_system_marker_quoted_in_user_text_untouched(monkeypatch, capsys, env):
+    quoted = rec(
+        "user",
+        [
+            {
+                "type": "text",
+                "text": 'see {"type":"api-request","id":"x"} and "type":"skill_listing"',
+            }
+        ],
+    )
+    f = compact(env.projects / "-proj" / "s1.jsonl", [quoted, api_blob()])
+    apply(monkeypatch, capsys, env, "--clean", "system-data")
+    assert raw_lines(f) == [compact(env.root / "q.jsonl", [quoted]).read_bytes()]
+
+
+def test_system_lone_surrogate_record(monkeypatch, capsys, env):
+    r = skill_listing(content="half an emoji \ud83d " + SKILLS_TEXT)
+    line = json.dumps(r, separators=(",", ":")).encode() + b"\n"  # \ud83d stays escaped
+    f = env.projects / "-proj" / "s1.jsonl"
+    f.parent.mkdir(parents=True)
+    f.write_bytes(line + compact(env.root / "b.jsonl", [api_blob()]).read_bytes())
+    t = time.time() - 7200
+    os.utime(f, (t, t))
+    code, _, err = apply(monkeypatch, capsys, env, "--clean", "system-data")
+    assert code == 0 and "ERROR" not in err
+    data = f.read_bytes()
+    data.decode("utf-8")  # strictly valid UTF-8
+    (o,) = [json.loads(x) for x in data.splitlines()]
+    assert o["attachment"]["content"] == "" and "\ud83d" in o["rendered"][0]["content"]
+
+
+def _corrupt(case):
+    """A system_stage replacement that makes one specific mistake."""
+    real = strip_images.system_stage
+
+    def stage(lines):
+        out = real(lines)
+        recs = [json.loads(x) for x in out]
+        i = next(n for n, r in enumerate(recs) if r.get("type") in ("user", "attachment"))
+        if case == "user_text_changed":
+            j = next(n for n, r in enumerate(recs) if r["type"] == "user")
+            recs[j]["message"]["content"][0]["text"] = "Remember 4712"
+        elif case == "uuid_line_dropped":
+            j = next(n for n, r in enumerate(recs) if r["type"] == "user")
+            del recs[j]
+        elif case == "other_attachment_field_changed":
+            j = next(
+                n
+                for n, r in enumerate(recs)
+                if r.get("attachment", {}).get("type") == "skill_listing"
+            )
+            recs[j]["attachment"]["skillCount"] = 9
+        elif case == "kept_kind_shrunk":
+            j = next(
+                n
+                for n, r in enumerate(recs)
+                if r.get("attachment", {}).get("type") == "prompt_snapshot"
+            )
+            recs[j]["attachment"]["systemPrompt"] = []
+        elif case == "rendered_changed":
+            j = next(
+                n
+                for n, r in enumerate(recs)
+                if r.get("attachment", {}).get("type") == "skill_listing"
+            )
+            recs[j]["rendered"] = [{"content": ""}]
+        elif case == "extra_line":
+            recs.append(recs[i])
+        return [strip_images.encode(r) + b"\n" for r in recs]
+
+    return stage
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "user_text_changed",
+        "uuid_line_dropped",
+        "other_attachment_field_changed",
+        "kept_kind_shrunk",
+        "rendered_changed",
+        "extra_line",
+    ],
+)
+def test_check_system_rejects(monkeypatch, capsys, env, case):
+    f = system_session(env.projects / "-proj" / "s1.jsonl")
+    before = f.read_bytes()
+    monkeypatch.setattr(strip_images, "system_stage", _corrupt(case))
+    code, _, err = apply(monkeypatch, capsys, env, "--clean", "system-data")
+    assert code == 1 and "ERROR" in err and "system-data check" in err
+    assert f.read_bytes() == before and backups(env) == [] and no_tmp(env)
+
+
+@pytest.mark.parametrize("case", ["no_rendered", "not_contained"])
+def test_check_system_rejects_listing_without_copy(monkeypatch, capsys, env, case):
+    r = skill_listing(rendered=case != "no_rendered")
+    if case == "not_contained":
+        r["rendered"] = [{"content": "another listing"}]
+    f = compact(env.projects / "-proj" / "s1.jsonl", [r])
+    before = f.read_bytes()
+
+    def stage(lines):  # empties the only copy
+        o = json.loads(lines[0])
+        o["attachment"]["content"] = ""
+        return [strip_images.encode(o) + b"\n"]
+
+    monkeypatch.setattr(strip_images, "system_stage", stage)
+    code, _, err = apply(monkeypatch, capsys, env, "--clean", "system-data")
+    assert code == 1 and "no copy in rendered" in err
+    assert f.read_bytes() == before and backups(env) == []
+
+
+def test_subagent_file_cleaned(monkeypatch, capsys, env):
+    f = system_session(env.projects / "-proj" / "s1" / "subagents" / "agent-a1.jsonl")
+    apply(monkeypatch, capsys, env, "--clean", "system-data")
+    assert not any(kind(x).startswith("api-request") for x in raw_lines(f))
+
+
+# ---------------------------------------------------------------- --clean and the report
+
+
+def mixed_session(env):
+    recs = read_image("t1", "/x/pic.png", b64()) + [
+        json.loads(x) for x in raw_lines(system_session(env.root / "tmp" / "sys.jsonl"))
+    ]
+    return compact(env.projects / "-proj" / "s1.jsonl", recs)
+
+
+def test_default_clean_is_images_only(monkeypatch, capsys, env):
+    f = mixed_session(env)
+    before = raw_lines(f)
+    code, out, _ = apply(monkeypatch, capsys, env)
+    after = raw_lines(f)
+    assert code == 0 and len(placeholders(f)) == 1 and len(after) == len(before)
+    for a, b in zip(before, after):  # only the image-carrying line changes
+        assert a == b or b'"base64"' in a
+    assert sum(a != b for a, b in zip(before, after)) == 1
+    assert "| - |" in out  # system data column not selected
+
+
+def test_clean_system_data_keeps_images(monkeypatch, capsys, env):
+    f = mixed_session(env)
+    code, _, _ = apply(monkeypatch, capsys, env, "--clean", "system-data")
+    assert code == 0 and placeholders(f) == []
+    assert sum(b'"base64"' in x for x in raw_lines(f)) == 1
+    assert not any(kind(x).startswith("api-request") for x in raw_lines(f))
+
+
+def test_clean_all(monkeypatch, capsys, env):
+    f = mixed_session(env)
+    code, _, _ = apply(monkeypatch, capsys, env, "--clean", "all")
+    assert code == 0 and len(placeholders(f)) == 1
+    assert not any(kind(x).startswith("api-request") for x in raw_lines(f))
+    assert len(backups(env)) == 1
+
+
+def test_process_reports_exact_bytes_per_kind(env):
+    f = mixed_session(env)
+    size0 = f.stat().st_size
+    b, n, blocks, img, sysd = strip_images.process(str(f), False, str(env.backup))
+    assert (b, blocks) == (size0, 1) and img > 0 and sysd > 0 and n == b - img - sysd
+    strip_images.process(str(f), True, str(env.backup / "1"), "images")
+    assert f.stat().st_size == size0 - img
+    strip_images.process(str(f), True, str(env.backup / "2"), "system-data")
+    assert f.stat().st_size == size0 - img - sysd
+
+
+def test_report_has_both_columns_in_dry_run(monkeypatch, capsys, env):
+    mixed_session(env)
+    code, out, _ = run(monkeypatch, capsys)
+    assert code == 0
+    assert re.search(r"\| images savable MB \| system data savable MB \|", out)
+    row = next(x for x in out.splitlines() if x.startswith("| **total**")).split("|")
+    assert row[4].strip() == "1" and "-" not in row[5] and "-" not in row[6]
+    assert "--clean system-data" in out
+
+
+def test_apply_unselected_column_dash(monkeypatch, capsys, env):
+    mixed_session(env)
+    _, out, _ = apply(monkeypatch, capsys, env, "--clean", "system-data")
+    row = next(x for x in out.splitlines() if x.startswith("| **total**")).split("|")
+    assert row[5].strip() == "-" and row[6].strip() != "-"
+    assert "images freed MB" in out
+
+
+def test_system_dry_run_writes_nothing(monkeypatch, capsys, env):
+    system_session(env.projects / "-proj" / "s1.jsonl")
+    before = snapshot(env.root)
+    for clean in ("images", "system-data", "all"):
+        code, out, _ = run(monkeypatch, capsys, "--clean", clean, "--backup-dir", env.backup)
+        assert code == 0 and "dry run" in out
+    assert snapshot(env.root) == before and not env.backup.exists()
+
+
+def test_system_live_and_recent_skipped(monkeypatch, capsys, env):
+    live = system_session(env.projects / "-proj" / "s1.jsonl")
+    recent = system_session(env.projects / "-proj" / "s2.jsonl", age_min=1)
+    (env.cfg / "sessions").mkdir()
+    (env.cfg / "sessions" / "1.json").write_text(
+        json.dumps({"pid": os.getpid(), "sessionId": "s1"})
+    )
+    before = (live.read_bytes(), recent.read_bytes())
+    apply(monkeypatch, capsys, env, "--clean", "all")
+    assert (live.read_bytes(), recent.read_bytes()) == before and backups(env) == []
