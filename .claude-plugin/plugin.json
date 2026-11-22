@@ -1,0 +1,10 @@
+{
+  "name": "transcript-image-cleanup",
+  "version": "0.1.0",
+  "description": "Map and strip base64 images embedded in Claude Code conversation history, keeping the history and --resume intact while freeing gigabytes.",
+  "author": {
+    "name": "Matěj Novák"
+  },
+  "license": "MIT",
+  "keywords": ["transcripts", "disk-space", "images", "cleanup", "session-history"]
+}
