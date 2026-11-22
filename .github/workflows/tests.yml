@@ -23,8 +23,6 @@ jobs:
             python: "3.13"
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python }}
-      - run: python -m pip install pytest
-      - run: python -m pytest -q tests
+      # uv supplies the interpreter: hosted runners no longer ship Python 3.8
+      - uses: astral-sh/setup-uv@v5
+      - run: uv run --no-project --python ${{ matrix.python }} --with pytest python -m pytest -q tests
